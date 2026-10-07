@@ -224,7 +224,13 @@ fn audio_effects_are_added_edited_and_removed_with_undo() {
     let (mut project, tl) = project();
     let mut history = History::default();
     let channel = MixerChannel::Master;
-    let normalize = |target_db| AudioEffect::new(crate::AudioEffectKind::Normalize { target_db });
+    let normalize = |target_db| {
+        AudioEffect::new(crate::AudioEffectKind::Normalize {
+            target_db,
+            mode: Default::default(),
+            set_level: Default::default(),
+        })
+    };
     let effects = |project: &Project| project.timelines[tl].master.effects.clone();
 
     history.do_command(
@@ -263,7 +269,13 @@ fn audio_effects_are_added_edited_and_removed_with_undo() {
 fn moving_an_audio_effect_reorders_the_chain_and_undoes() {
     let (mut project, tl) = project();
     let channel = MixerChannel::Track(0);
-    let normalize = |target_db| AudioEffect::new(crate::AudioEffectKind::Normalize { target_db });
+    let normalize = |target_db| {
+        AudioEffect::new(crate::AudioEffectKind::Normalize {
+            target_db,
+            mode: Default::default(),
+            set_level: Default::default(),
+        })
+    };
     project.timelines[tl].tracks[0].mix.effects =
         vec![normalize(-1.0), normalize(-2.0), normalize(-3.0)];
     let targets = |project: &Project| -> Vec<f32> {
@@ -272,7 +284,7 @@ fn moving_an_audio_effect_reorders_the_chain_and_undoes() {
             .effects
             .iter()
             .map(|e| match e.kind {
-                crate::AudioEffectKind::Normalize { target_db } => target_db,
+                crate::AudioEffectKind::Normalize { target_db, .. } => target_db,
                 crate::AudioEffectKind::MultibandCompressor(_)
                 | crate::AudioEffectKind::Mono
                 | crate::AudioEffectKind::Equalizer(_) => f32::NAN,

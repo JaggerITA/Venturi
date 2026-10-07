@@ -1834,9 +1834,14 @@ impl AudioEffect {
 /// effects.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AudioEffectKind {
-    /// Gain that brings the peak of the whole channel to `target_db` dBFS.
+    /// Gain that brings the level of the channel to `target_db`: dBFS for
+    /// the peak modes, LUFS for loudness.
     Normalize {
         target_db: f32,
+        #[serde(default)]
+        mode: NormalizeMode,
+        #[serde(default)]
+        set_level: SetLevel,
     },
     MultibandCompressor(MultibandCompressor),
     /// Every channel gets their average: a voice recorded on one side
@@ -1849,6 +1854,8 @@ impl AudioEffectKind {
     pub const ALL: [AudioEffectKind; 4] = [
         AudioEffectKind::Normalize {
             target_db: NORMALIZE_TARGET_DEFAULT,
+            mode: NormalizeMode::SamplePeak,
+            set_level: SetLevel::Relative,
         },
         AudioEffectKind::MultibandCompressor(MultibandCompressor::DEFAULT),
         AudioEffectKind::Equalizer(Equalizer::DEFAULT),
@@ -1968,8 +1975,58 @@ impl CompressorBand {
 }
 
 pub const NORMALIZE_TARGET_DEFAULT: f32 = -1.0;
-pub const NORMALIZE_TARGET_MIN: f32 = -30.0;
-pub const NORMALIZE_TARGET_MAX: f32 = 0.0;
+
+/// How a normalization measures the level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NormalizeMode {
+    #[default]
+    SamplePeak,
+    /// Also the peaks between the samples (ITU-R BS.1770 Annex 2), which
+    /// a conversion or a lossy encode can bring out.
+    TruePeak,
+    /// Integrated loudness, EBU R128 / ITU-R BS.1770: K-weighted and gated.
+    Loudness,
+}
+
+impl NormalizeMode {
+    pub const ALL: [NormalizeMode; 3] = [
+        NormalizeMode::SamplePeak,
+        NormalizeMode::TruePeak,
+        NormalizeMode::Loudness,
+    ];
+
+    pub fn is_loudness(self) -> bool {
+        self == NormalizeMode::Loudness
+    }
+
+    /// dBFS for the peaks, LUFS for loudness.
+    pub fn target_range(self) -> std::ops::RangeInclusive<f32> {
+        if self.is_loudness() {
+            -40.0..=-5.0
+        } else {
+            -30.0..=0.0
+        }
+    }
+
+    pub fn default_target(self) -> f32 {
+        if self.is_loudness() {
+            -23.0
+        } else {
+            NORMALIZE_TARGET_DEFAULT
+        }
+    }
+}
+
+/// How the clips of a track share a normalization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SetLevel {
+    /// Each clip gets its own gain: all of them reach the target.
+    Independent,
+    /// One gain for all of them, so the loudest one reaches the target and
+    /// the differences between them stay.
+    #[default]
+    Relative,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {

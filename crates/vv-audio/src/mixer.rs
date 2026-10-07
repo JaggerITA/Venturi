@@ -10,11 +10,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use vv_core::{
     AudioEffectKind, ChannelStrip, ClipSource, Equalizer, FrameIdx, Keyframed, MediaId,
-    MixerChannel, MultibandCompressor, Project, Timeline, TimelineId,
+    MixerChannel, MultibandCompressor, NormalizeMode, Project, SetLevel, Timeline, TimelineId,
 };
 
 use crate::dynamics::{BandActivity, MultibandProcessor};
 use crate::eq::EqProcessor;
+use crate::loudness::LevelMeter;
 use crate::spectrum::SpectrumTap;
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
@@ -240,6 +241,9 @@ pub enum Insert {
     /// inserts aligned with the effects of the strip.
     Off,
     Gain(f32),
+    /// By timeline audio frame each gain starts at, ascending: one per clip
+    /// of the track, held until the next one (the first also before it).
+    ClipGains(Vec<(u64, f32)>),
     Compressor(MultibandCompressor),
     Mono,
     Eq(Equalizer),
@@ -393,7 +397,7 @@ impl MixState {
                 .inserts
                 .iter()
                 .map(|insert| match insert {
-                    Insert::Off | Insert::Gain(_) | Insert::Mono => None,
+                    Insert::Off | Insert::Gain(_) | Insert::ClipGains(_) | Insert::Mono => None,
                     Insert::Compressor(params) => Some(Processor::Compressor(
                         MultibandProcessor::new(params, rate, channels),
                     )),
@@ -444,23 +448,25 @@ impl MixState {
     }
 }
 
-/// The channel a normalization measures: while a new reading is on its way,
-/// the same slot keeps playing with its last one.
-/// The channel and the position of the normalization in its chain.
-pub type AnalysisSlot = (TimelineId, MixerChannel, usize);
+/// What a normalization measures: while a new reading is on its way, the
+/// same slot keeps playing with its last one. The channel, the position of
+/// the normalization in its chain and the clip of the track (0 for the
+/// whole master).
+pub type AnalysisSlot = (TimelineId, MixerChannel, usize, usize);
 
-/// A part of the mix whose peak a normalization needs.
-pub struct PeakAnalysis {
+/// A part of the mix whose level a normalization needs.
+pub struct LevelAnalysis {
     pub slot: Option<AnalysisSlot>,
+    mode: NormalizeMode,
     snapshot: MixSnapshot,
 }
 
-impl PeakAnalysis {
-    /// Same key, same content, same peak.
+impl LevelAnalysis {
+    /// Same key, same content, same level.
     pub fn key(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let s = &self.snapshot;
-        (s.sample_rate, s.channels).hash(&mut h);
+        (self.mode as u8, s.sample_rate, s.channels).hash(&mut h);
         for clip in &s.clips {
             (
                 clip.start,
@@ -489,7 +495,7 @@ impl PeakAnalysis {
         h.finish()
     }
 
-    /// Linear peak over all the channels. Slow: it renders the whole mix.
+    /// See `LevelMeter::finish`. Slow: it renders the whole mix.
     pub fn run(&self) -> f32 {
         const CHUNK_FRAMES: u64 = 1 << 16;
         let clips = &self.snapshot.clips;
@@ -498,16 +504,17 @@ impl PeakAnalysis {
         let ch = self.snapshot.channels.max(1) as usize;
         let mut out = vec![0.0f32; CHUNK_FRAMES as usize * ch];
         let mut state = MixState::new(&self.snapshot);
-        let mut peak = 0.0f32;
+        let mut meter =
+            LevelMeter::new(self.mode, self.snapshot.sample_rate, self.snapshot.channels);
         let mut f = start;
         while f < end {
             let frames = (end - f).min(CHUNK_FRAMES);
             let chunk = &mut out[..frames as usize * ch];
             mix_into(&self.snapshot, &mut state, f, chunk, false);
-            peak = chunk.iter().fold(peak, |p, s| p.max(s.abs()));
+            meter.push(chunk);
             f += frames;
         }
-        peak
+        meter.finish()
     }
 }
 
@@ -516,6 +523,12 @@ fn hash_insert(insert: &Insert, h: &mut impl Hasher) {
         Insert::Off => 2u8.hash(h),
         Insert::Mono => 3u8.hash(h),
         Insert::Gain(gain) => (0u8, gain.to_bits()).hash(h),
+        Insert::ClipGains(gains) => {
+            5u8.hash(h);
+            for (start, gain) in gains {
+                (start, gain.to_bits()).hash(h);
+            }
+        }
         Insert::Compressor(params) => {
             (1u8, params.crossovers_hz.map(f32::to_bits)).hash(h);
             for band in &params.bands {
@@ -541,7 +554,7 @@ fn hash_insert(insert: &Insert, h: &mut impl Hasher) {
     }
 }
 
-pub enum PeakReading {
+pub enum LevelReading {
     Ready(f32),
     /// Being measured; the last reading of the same slot, if any.
     Pending(Option<f32>),
@@ -601,8 +614,8 @@ pub trait AudioSource {
     }
 
     /// Synchronous here; the preview measures in the background.
-    fn peak(&mut self, analysis: PeakAnalysis) -> PeakReading {
-        PeakReading::Ready(analysis.run())
+    fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
+        LevelReading::Ready(analysis.run())
     }
 }
 
@@ -734,20 +747,20 @@ fn collect_clips(
         let track_clips: Vec<MixClip> =
             clips.iter().filter(|c| c.track == index).cloned().collect();
         // Measured alone and before the fader: only this track has an entry.
-        let measure = |inserts: &[Insert]| {
+        let measure = |inserts: &[Insert], clip: Option<usize>| {
             let mut tracks = vec![Channel::UNITY; index + 1];
             tracks[index].inserts = inserts.to_vec();
-            MixSnapshot::new(
-                sample_rate,
-                channels,
-                track_clips.clone(),
-                tracks,
-                Channel::UNITY,
-            )
+            let clips = match clip {
+                Some(clip) => vec![track_clips[clip].clone()],
+                None => track_clips.clone(),
+            };
+            MixSnapshot::new(sample_rate, channels, clips, tracks, Channel::UNITY)
         };
+        let clip_starts: Vec<u64> = track_clips.iter().map(|c| c.start).collect();
         let inserts = resolve_chain(
             &track.mix,
-            !track_clips.is_empty(),
+            !clip_starts.is_empty(),
+            &clip_starts,
             slot(MixerChannel::Track(index)),
             measure,
             source,
@@ -758,7 +771,7 @@ fn collect_clips(
             bus: Bus::from_strip(&track.mix),
         });
     }
-    let measure = |inserts: &[Insert]| {
+    let measure = |inserts: &[Insert], _: Option<usize>| {
         let master = Channel {
             inserts: inserts.to_vec(),
             bus: Bus::UNITY,
@@ -769,6 +782,7 @@ fn collect_clips(
         inserts: resolve_chain(
             &timeline.master,
             !clips.is_empty(),
+            &[],
             slot(MixerChannel::Master),
             measure,
             source,
@@ -782,12 +796,14 @@ fn collect_clips(
 
 /// The effects of `strip`, in order, one insert each. A normalization
 /// measures the channel through the effects before it (`measure` builds that
-/// mix), so it stays right after a compressor too.
+/// mix, of one clip or of all of them), so it stays right after a compressor
+/// too. `clip_starts`: the clips of a track; the master is measured whole.
 fn resolve_chain(
     strip: &ChannelStrip,
     has_audio: bool,
+    clip_starts: &[u64],
     slot: Option<(TimelineId, MixerChannel)>,
-    measure: impl Fn(&[Insert]) -> MixSnapshot,
+    measure: impl Fn(&[Insert], Option<usize>) -> MixSnapshot,
     source: &mut impl AudioSource,
     readiness: &mut Readiness,
 ) -> Vec<Insert> {
@@ -797,42 +813,70 @@ fn resolve_chain(
             inserts.push(Insert::Off);
             continue;
         }
-        match &effect.kind {
-            AudioEffectKind::Normalize { .. } if !has_audio => inserts.push(Insert::Off),
-            AudioEffectKind::Normalize { target_db } => {
-                let reading = source.peak(PeakAnalysis {
-                    slot: slot.map(|(timeline, channel)| (timeline, channel, inserts.len())),
-                    snapshot: measure(&inserts),
-                });
-                inserts.push(Insert::Gain(normalize_gain(*target_db, reading, readiness)));
+        let insert = match &effect.kind {
+            AudioEffectKind::Normalize { .. } if !has_audio => Insert::Off,
+            &AudioEffectKind::Normalize {
+                target_db,
+                mode,
+                set_level,
+            } => {
+                let mut gain = |clip: Option<usize>| {
+                    let reading = source.level(LevelAnalysis {
+                        slot: slot.map(|(timeline, channel)| {
+                            (timeline, channel, inserts.len(), clip.unwrap_or(0))
+                        }),
+                        mode,
+                        snapshot: measure(&inserts, clip),
+                    });
+                    normalize_gain(target_db, reading, readiness)
+                };
+                // The loudest peak of the clips is the peak of the track:
+                // measured in one go.
+                let per_clip = !clip_starts.is_empty()
+                    && (set_level == SetLevel::Independent || mode.is_loudness());
+                if !per_clip {
+                    Insert::Gain(gain(None).unwrap_or(1.0))
+                } else {
+                    let gains: Vec<Option<f32>> = (0..clip_starts.len())
+                        .map(|clip| gain(Some(clip)))
+                        .collect();
+                    match set_level {
+                        SetLevel::Relative => Insert::Gain(
+                            gains.into_iter().flatten().reduce(f32::min).unwrap_or(1.0),
+                        ),
+                        SetLevel::Independent => Insert::ClipGains(
+                            clip_starts
+                                .iter()
+                                .zip(gains)
+                                .map(|(start, gain)| (*start, gain.unwrap_or(1.0)))
+                                .collect(),
+                        ),
+                    }
+                }
             }
-            AudioEffectKind::MultibandCompressor(params) => {
-                inserts.push(Insert::Compressor(params.clone()));
-            }
-            AudioEffectKind::Mono => inserts.push(Insert::Mono),
-            AudioEffectKind::Equalizer(params) => inserts.push(Insert::Eq(params.clone())),
-        }
+            AudioEffectKind::MultibandCompressor(params) => Insert::Compressor(params.clone()),
+            AudioEffectKind::Mono => Insert::Mono,
+            AudioEffectKind::Equalizer(params) => Insert::Eq(params.clone()),
+        };
+        inserts.push(insert);
     }
     inserts
 }
 
 /// A reading still on its way leaves the mix `Partial`, so a compound
-/// containing it is not cached with the wrong gain.
-fn normalize_gain(target_db: f32, reading: PeakReading, readiness: &mut Readiness) -> f32 {
-    let peak = match reading {
-        PeakReading::Ready(peak) => Some(peak),
-        PeakReading::Pending(last) => {
+/// containing it is not cached with the wrong gain. `None` for silence,
+/// which stays silence instead of getting the maximum gain.
+fn normalize_gain(target_db: f32, reading: LevelReading, readiness: &mut Readiness) -> Option<f32> {
+    let level = match reading {
+        LevelReading::Ready(level) => Some(level),
+        LevelReading::Pending(last) => {
             *readiness = (*readiness).max(Readiness::Partial);
             last
         }
     };
-    match peak {
-        // Silence stays silence, instead of the maximum gain.
-        Some(peak) if peak > 1e-6 => {
-            (db_to_linear(target_db) / peak).min(db_to_linear(vv_core::GAIN_DB_MAX))
-        }
-        _ => 1.0,
-    }
+    level
+        .filter(|level| *level > 1e-6)
+        .map(|level| (db_to_linear(target_db) / level).min(db_to_linear(vv_core::GAIN_DB_MAX)))
 }
 
 /// The mixdown of the nested timeline of compound clip `media_id`, at
@@ -1078,6 +1122,7 @@ fn mix_into(
                 processors.unwrap_or_default(),
                 scratch,
                 ch,
+                block_time,
                 meters,
             );
             let mut peak = [0.0f32; 2];
@@ -1100,6 +1145,7 @@ fn mix_into(
             &mut state.master,
             block,
             ch,
+            block_time,
             meters,
         );
         for frame in block.chunks_exact_mut(ch) {
@@ -1124,18 +1170,21 @@ fn mix_into(
     }
 }
 
-/// `meters`: where the compressors report, if metered.
+/// `samples` start at timeline audio frame `time`. `meters`: where the
+/// compressors report, if metered.
 fn apply_inserts(
     inserts: &[Insert],
     processors: &mut [Option<Processor>],
     samples: &mut [f32],
     channels: usize,
+    time: u64,
     meters: Option<&[InsertMeter]>,
 ) {
     for (index, insert) in inserts.iter().enumerate() {
         match insert {
             Insert::Off => {}
             Insert::Gain(gain) => samples.iter_mut().for_each(|s| *s *= gain),
+            Insert::ClipGains(gains) => apply_clip_gains(gains, time, samples, channels),
             Insert::Mono => {
                 for frame in samples.chunks_exact_mut(channels.max(1)) {
                     let average = frame.iter().sum::<f32>() / frame.len() as f32;
@@ -1165,6 +1214,26 @@ fn apply_inserts(
                 }
             }
         }
+    }
+}
+
+fn apply_clip_gains(gains: &[(u64, f32)], time: u64, samples: &mut [f32], channels: usize) {
+    if gains.is_empty() {
+        return;
+    }
+    let ch = channels.max(1);
+    let frames = samples.len() / ch;
+    let mut from = 0;
+    while from < frames {
+        let next = gains.partition_point(|(start, _)| *start <= time + from as u64);
+        let gain = gains[next.saturating_sub(1)].1;
+        let to = gains
+            .get(next)
+            .map_or(frames, |(start, _)| ((start - time) as usize).min(frames));
+        samples[from * ch..to * ch]
+            .iter_mut()
+            .for_each(|s| *s *= gain);
+        from = to;
     }
 }
 

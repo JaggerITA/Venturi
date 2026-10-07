@@ -888,7 +888,72 @@ fn only_the_metered_mix_raises_the_meters_and_taking_resets_them() {
 }
 
 fn normalize(target_db: f32) -> vv_core::AudioEffect {
-    vv_core::AudioEffect::new(vv_core::AudioEffectKind::Normalize { target_db })
+    normalize_with(target_db, NormalizeMode::SamplePeak, SetLevel::Relative)
+}
+
+fn normalize_with(
+    target_db: f32,
+    mode: NormalizeMode,
+    set_level: SetLevel,
+) -> vv_core::AudioEffect {
+    vv_core::AudioEffect::new(vv_core::AudioEffectKind::Normalize {
+        target_db,
+        mode,
+        set_level,
+    })
+}
+
+#[test]
+fn independent_normalization_brings_every_clip_to_the_target() {
+    let (project, _, b) = project();
+    // Peaks 0.049 and 0.549, a gap between them.
+    let clips = vec![clip_at(b, 0, 0, 5), clip_at(b, 10, 50, 5)];
+    let mut track = audio_track(clips);
+    track.mix.effects = vec![normalize_with(
+        0.0,
+        NormalizeMode::SamplePeak,
+        SetLevel::Independent,
+    )];
+    let out = render(&project, &timeline(vec![track]), 0, 150);
+    let peak =
+        |range: std::ops::Range<usize>| out[range].iter().fold(0.0f32, |p, s| p.max(s.abs()));
+    assert!((peak(0..50) - 1.0).abs() < 1e-5, "{}", peak(0..50));
+    assert!((peak(100..150) - 1.0).abs() < 1e-5, "{}", peak(100..150));
+}
+
+/// Reads the level of each clip from where it starts.
+struct LevelByStart(Vec<(u64, f32)>);
+
+impl AudioSource for LevelByStart {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
+    }
+
+    fn level(&mut self, analysis: LevelAnalysis) -> LevelReading {
+        let start = analysis.snapshot.clips[0].start;
+        let level = self.0.iter().find(|(s, _)| *s == start).map(|(_, l)| *l);
+        LevelReading::Ready(level.unwrap())
+    }
+}
+
+#[test]
+fn set_level_relative_keeps_the_differences_and_brings_the_loudest_clip_to_the_target() {
+    let (project, a, _) = project();
+    let mut track = audio_track(vec![clip_at(a, 0, 0, 5), clip_at(a, 10, 0, 5)]);
+    let target = 20.0 * 0.4f32.log10();
+    let mut mix = |set_level| {
+        track.mix.effects = vec![normalize_with(target, NormalizeMode::Loudness, set_level)];
+        let tl = timeline(vec![track.clone()]);
+        let mut source = LevelByStart(vec![(0, 0.1), (100, 0.2)]);
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+        let mut out = vec![9.0; 150];
+        mix_range(&snap, 0, &mut out);
+        (out[25], out[125])
+    };
+    let (first, second) = mix(SetLevel::Relative);
+    assert!((first - 1.0).abs() < 1e-5 && (second - 1.0).abs() < 1e-5);
+    let (first, second) = mix(SetLevel::Independent);
+    assert!((first - 2.0).abs() < 1e-5 && (second - 1.0).abs() < 1e-5);
 }
 
 #[test]
@@ -947,8 +1012,8 @@ impl AudioSource for PendingPeaks {
         self.stored = true;
     }
 
-    fn peak(&mut self, _: PeakAnalysis) -> PeakReading {
-        PeakReading::Pending(self.last)
+    fn level(&mut self, _: LevelAnalysis) -> LevelReading {
+        LevelReading::Pending(self.last)
     }
 }
 
@@ -1197,7 +1262,11 @@ fn a_range_mix_reads_whole_clips_for_a_normalization() {
     let mut tl = timeline(vec![audio_track(vec![clip_at(b, 0, 0, 50)])]);
     tl.master.effects.push(vv_core::AudioEffect {
         enabled: true,
-        kind: AudioEffectKind::Normalize { target_db: -1.0 },
+        kind: AudioEffectKind::Normalize {
+            target_db: -1.0,
+            mode: NormalizeMode::SamplePeak,
+            set_level: SetLevel::Relative,
+        },
     });
     let mut source = Windowed::default();
     let snap = MixSnapshot::from_timeline_range(&project, &tl, RATE, 1, &mut source, 100..150);

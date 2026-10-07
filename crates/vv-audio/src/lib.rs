@@ -5,13 +5,14 @@
 pub mod dynamics;
 pub mod eq;
 mod filter;
+pub mod loudness;
 pub mod mixer;
 pub mod recorder;
 pub mod spectrum;
 pub mod stretch;
 
 pub use mixer::{
-    AnalysisSlot, AudioSource, BandMeter, ClipAudio, MixSnapshot, Mixer, MixerState, PeakAnalysis,
-    PeakReading, StretchedWindow,
+    AnalysisSlot, AudioSource, BandMeter, ClipAudio, LevelAnalysis, LevelReading, MixSnapshot,
+    Mixer, MixerState, StretchedWindow,
 };
 pub use stretch::stretch_samples;

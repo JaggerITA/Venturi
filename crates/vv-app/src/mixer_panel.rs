@@ -7,8 +7,8 @@ use vv_audio::dynamics::BandActivity;
 use vv_audio::mixer::{BandMeter, MixMeters, StereoPeak, db_to_linear};
 use vv_core::{
     AddAudioEffect, AudioEffect, AudioEffectKind, ChannelStrip, CommandLabel, MixerChannel,
-    MixerParam, MoveAudioEffect, Project, RemoveAudioEffect, SetAudioEffect, SetMixerParam,
-    SetTrackFlag, Timeline, TimelineId, TrackFlag, TrackKind,
+    MixerParam, MoveAudioEffect, NormalizeMode, Project, RemoveAudioEffect, SetAudioEffect,
+    SetLevel, SetMixerParam, SetTrackFlag, Timeline, TimelineId, TrackFlag, TrackKind,
 };
 
 use crate::properties_panel::{BoxedCommand, drag_field, slider_field};
@@ -211,21 +211,108 @@ pub(crate) fn show_mixer(
     commands
 }
 
-fn normalize_settings(ui: &mut egui::Ui, mut target_db: f32) -> Option<AudioEffectKind> {
-    let changed = ui
-        .horizontal(|ui| {
-            ui.label(t!("mixer.normalize_target"));
-            slider_field(
-                ui,
-                &mut target_db,
-                vv_core::NORMALIZE_TARGET_MIN..=vv_core::NORMALIZE_TARGET_MAX,
-                0.1,
-                1,
-            )
-        })
-        .inner;
-    ui.small(t!("mixer.normalize_hint"));
-    changed.then_some(AudioEffectKind::Normalize { target_db })
+/// Loudness targets of the common deliveries, in LUFS.
+const LOUDNESS_PRESETS: [(f32, &str); 3] = [
+    (-23.0, "EBU R128"),
+    (-24.0, "ATSC A/85"),
+    (-14.0, "Streaming"),
+];
+
+/// `set_level` only on a track: the master is one mix, not clips.
+fn normalize_settings(
+    ui: &mut egui::Ui,
+    mut target_db: f32,
+    mut mode: NormalizeMode,
+    mut set_level: SetLevel,
+    channel: MixerChannel,
+) -> Option<AudioEffectKind> {
+    let mut changed = false;
+    egui::Grid::new("normalize_settings")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(t!("mixer.normalize_mode"));
+            egui::ComboBox::from_id_salt("normalize_mode")
+                .width(220.0)
+                .selected_text(normalize_mode_name(mode))
+                .show_ui(ui, |ui| {
+                    for option in NormalizeMode::ALL {
+                        if ui
+                            .selectable_label(mode == option, normalize_mode_name(option))
+                            .clicked()
+                            && mode != option
+                        {
+                            // dBFS and LUFS targets do not carry over.
+                            if mode.is_loudness() != option.is_loudness() {
+                                target_db = option.default_target();
+                            }
+                            mode = option;
+                            changed = true;
+                        }
+                    }
+                });
+            ui.end_row();
+
+            let unit = if mode.is_loudness() { "LUFS" } else { "dBFS" };
+            ui.label(t!("mixer.normalize_target", unit = unit));
+            ui.horizontal(|ui| {
+                changed |= slider_field(ui, &mut target_db, mode.target_range(), 0.1, 1);
+            });
+            ui.end_row();
+
+            if mode.is_loudness() {
+                ui.label("");
+                ui.horizontal(|ui| {
+                    for (lufs, name) in LOUDNESS_PRESETS {
+                        if ui
+                            .selectable_label(target_db == lufs, format!("{name} ({lufs})"))
+                            .clicked()
+                        {
+                            target_db = lufs;
+                            changed = true;
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+
+            if matches!(channel, MixerChannel::Track(_)) {
+                ui.label(t!("mixer.normalize_set_level"));
+                ui.horizontal(|ui| {
+                    let options = [
+                        (SetLevel::Independent, t!("mixer.set_level_independent")),
+                        (SetLevel::Relative, t!("mixer.set_level_relative")),
+                    ];
+                    for (option, name) in options {
+                        changed |= ui.radio_value(&mut set_level, option, name).changed();
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    let hint = match (channel, set_level) {
+        (MixerChannel::Master, _) => t!("mixer.normalize_hint_master"),
+        (_, SetLevel::Independent) => t!("mixer.normalize_hint_independent"),
+        (_, SetLevel::Relative) => t!("mixer.normalize_hint_relative"),
+    };
+    ui.small(hint);
+    if mode.is_loudness() {
+        ui.small(t!("mixer.normalize_hint_loudness"));
+    }
+    changed.then_some(AudioEffectKind::Normalize {
+        target_db,
+        mode,
+        set_level,
+    })
+}
+
+fn normalize_mode_name(mode: NormalizeMode) -> String {
+    match mode {
+        NormalizeMode::SamplePeak => t!("mixer.normalize_sample_peak"),
+        NormalizeMode::TruePeak => t!("mixer.normalize_true_peak"),
+        NormalizeMode::Loudness => t!("mixer.normalize_loudness"),
+    }
+    .into_owned()
 }
 
 fn channel_label(timeline: &Timeline, channel: MixerChannel) -> String {
@@ -325,7 +412,11 @@ fn effect_window(
                 ui.weak(t!("mixer.effect_disabled"));
             }
             let edited = match &effect.kind {
-                AudioEffectKind::Normalize { target_db } => normalize_settings(ui, *target_db),
+                &AudioEffectKind::Normalize {
+                    target_db,
+                    mode,
+                    set_level,
+                } => normalize_settings(ui, target_db, mode, set_level, channel),
                 AudioEffectKind::Mono => {
                     ui.label(t!("mixer.mono_hint"));
                     None
