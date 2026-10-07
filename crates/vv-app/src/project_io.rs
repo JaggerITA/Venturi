@@ -4,6 +4,13 @@
 use super::*;
 use std::sync::Arc;
 
+/// Dialog glob filters are case-sensitive (GoPro writes `.MP4`).
+fn with_upper_case(exts: &[&str]) -> Vec<String> {
+    exts.iter()
+        .flat_map(|e| [e.to_string(), e.to_uppercase()])
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProjectSwitch {
     New,
@@ -347,22 +354,19 @@ impl VenturiApp {
     // Opens the file dialog and imports the chosen files (used by the toolbar
     // button and by the Ctrl+I shortcut).
     pub(crate) fn import_media_dialog(&mut self) {
-        self.spawn_dialog(DialogKind::ImportMedia, |dlg| {
+        const VIDEO: &[&str] = &["mp4", "mov", "mkv", "avi"];
+        const AUDIO: &[&str] = &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"];
+        let media: Vec<&str> = [VIDEO, AUDIO, vv_media::IMAGE_EXTENSIONS].concat();
+        self.spawn_dialog(DialogKind::ImportMedia, move |dlg| {
             DialogOutcome::Files(
-                dlg.add_filter(
-                    "media",
-                    &[
-                        "mp4", "mov", "mkv", "avi", "wav", "mp3", "flac", "m4a", "aac", "ogg",
-                        "opus", "jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff",
-                    ],
-                )
-                .add_filter("video", &["mp4", "mov", "mkv", "avi"])
-                .add_filter(
-                    "audio",
-                    &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"],
-                )
-                .add_filter(t!("file_filter.images"), vv_media::IMAGE_EXTENSIONS)
-                .pick_files(),
+                dlg.add_filter("media", &with_upper_case(&media))
+                    .add_filter("video", &with_upper_case(VIDEO))
+                    .add_filter("audio", &with_upper_case(AUDIO))
+                    .add_filter(
+                        t!("file_filter.images"),
+                        &with_upper_case(vv_media::IMAGE_EXTENSIONS),
+                    )
+                    .pick_files(),
             )
         });
     }
@@ -1308,3 +1312,7 @@ fn format_elapsed(d: std::time::Duration) -> String {
         _ => format!("{}h {:02}m {:02}s", secs / 3600, secs / 60 % 60, secs % 60),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/project_io.rs"]
+mod tests;
